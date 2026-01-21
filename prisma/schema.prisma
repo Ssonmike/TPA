@@ -1,0 +1,424 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Enums
+enum SalesOrderStatus {
+  OPEN
+  ON_HOLD
+  BLOCKED // New
+  PALLET_CALC_REQUESTED
+  CALCULATED // New
+  GROUPED
+  TRUCKED // New
+  PLANNED
+  SHIPPED // New
+  RECEIVED
+  CANCELLED
+  
+  // Legacy / Transitional
+  PALLET_READY
+  TRUCK_CALC_REQUESTED
+  TRUCK_READY
+  REQUESTED
+  ACCEPTED // New for CBA
+  REJECTED // New for CBA
+  CONSOLIDATION_REQUESTED // New for CBA Evolution
+  
+  // Booking Logic
+  BOOKING_REQUESTED
+  BOOKING_RECEIVED
+  BOOKING_CONFIRMED
+  APT_BOOKED // New CBA Workflow
+  APT_RESERVED // New CBA Workflow
+}
+
+enum ShippingType {
+  DIRECT_LTL
+  DIRECT_FTL
+  GROUPAGE
+  PARCEL
+}
+
+enum TPAGroupStatus {
+  OPEN
+  READY // New
+  TRUCKED // New
+  PLANNED
+  CANCELLED
+  
+  // Legacy
+  ON_HOLD
+  PALLET_CALC_REQUESTED
+  PALLET_READY
+  REQUESTED
+  RECEIVED
+}
+
+enum TruckGroupStatus {
+  OPEN
+  PLANNED
+  CANCELLED
+  
+  // Legacy
+  TRUCK_CALC_REQUESTED
+  TRUCK_READY
+}
+
+enum TruckType {
+  STANDARD
+  COMBI_1
+  COMBI_2
+  LZV
+  CUSTOM
+}
+
+
+enum BlockReason {
+  MISSING_MASTERDATA
+  COUNTRY_NOT_ALLOWED_FOR_PARCEL
+  DIMENSION_LIMIT_EXCEEDED
+  WEIGHT_LIMIT_EXCEEDED
+  SHIP_TO_FORCE_DIRECT_CONFLICT
+  LANE_NOT_FOUND
+  CAPACITY_EXCEEDED
+  INVALID_DATA
+  MANUAL_CHECK_REQUIRED
+}
+
+// Models
+
+model EventLog {
+  id        String   @id @default(uuid())
+  entityType String
+  entityId   String
+  eventType  String
+  payload    Json?
+  actor      String?
+  createdAt  DateTime @default(now())
+}
+
+model Carrier {
+  id        String   @id @default(uuid())
+  code      String   @unique
+  name      String
+  active    Boolean  @default(true)
+}
+
+model ShippingCalendar {
+  id        String   @id @default(uuid())
+  date      DateTime @unique
+  isHoliday Boolean  @default(false)
+  description String?
+}
+
+model ThresholdRule {
+  id                   String   @id @default(uuid())
+  minVolumeDirect      Decimal  @default(15.6)
+  minVolumeFTL         Decimal  @default(70.0)
+  maxVolumeGroupage    Decimal  @default(15.6)
+}
+
+model Customer {
+  id               String   @id @default(uuid())
+  customerId       String   
+  countryReference String
+  shipToId         String
+  
+  salesOrders      SalesOrder[]
+  
+  @@unique([customerId, shipToId])
+}
+
+model SalesOrder {
+  id                    String           @id @default(uuid())
+  sapSalesOrderNumber   String           @unique
+  orderReferenceNumber  String
+  requestedShippingDate DateTime
+  
+  // Weights & Dims
+  weight                Decimal          @map("weightKg") // Aligning naming preferred by spec? Keeping original for now to avoid breaking seed map, but functionality matches.
+  volumeM3              Decimal
+  loadingMeters         Decimal?
+  pallets               Int?             // Now optional in spec, was Int
+  cartonQuantity        Int              @map("pcs")      // Map to pcs
+  height                Decimal
+  
+  // Location
+  shipToAddress         String           @map("shipToId") // Mapping existing field
+  shipToName            String?
+  country               String
+  zipCode               String           @map("zip")
+  city                  String
+  
+  // Logic
+  vasCode               String?
+  incoterm              String
+  priorityLevel         Int?             @map("priority")
+  assignee              String?
+  isConsolidation       Boolean          @default(false)
+  isNonConsolidation    Boolean          @default(false) // New
+  
+  // ShipTo Consolidation
+  consolidationAllowed  Boolean          @default(true)
+  isShipToIdSimulated   Boolean          @default(true)
+  shipToCountry         String?
+  shipToZip             String?
+  shipToCity            String?
+  shipToStreet          String?
+  shipToHouseNo         String?
+
+  // ORTEC / TPA Consolidation
+  tpaNumber             String?
+  tpaNumberSoCount      Int              @default(1)
+  tpaTotalPallets       Int?
+  tpaTotalLdm           Decimal?
+  ldmAllocated          Decimal?
+  
+  status                SalesOrderStatus @default(OPEN)
+  shippingType          ShippingType     @default(GROUPAGE)
+  
+  // Blocking & Holding
+  holdReason            String?          @map("onHoldReason")
+  blockReason           BlockReason?
+  blockDetails          String?
+  
+  isActive              Boolean          @default(true)
+  is105InchModel        Boolean          @default(false)
+  deliveryInstructions  String?
+  
+  // UI Enhancement Fields
+  cityInitials          String?          // City initials for display (e.g., BE, MU, AM)
+  consignee             String?          // Person name for delivery
+  deliveryInstruction   String?          // Special delivery instructions
+  
+  // Carrier Assignment
+  carrierName           String?
+  firstPickupDate       DateTime?
+  
+  // Relations
+  customerId            String
+  customer              Customer         @relation(fields: [customerId], references: [id])
+  
+  tpaGroupId            String?
+  tpaGroup              TPAGroup?        @relation(fields: [tpaGroupId], references: [id])
+
+  truckGroupId          String?          @map("truckId")
+  truckGroup            TruckGroup?      @relation(fields: [truckGroupId], references: [id])
+
+  // Re-Mix / Planning History
+  activePlanningResultId String?
+  activePlanningResult   PlanningResult? @relation(fields: [activePlanningResultId], references: [id])
+  
+  effectiveShipmentType String? // New: Stores the result of Re-Mix (e.g. DIRECT_LTL)
+
+  // Booking Logic (New for Direct Planning)
+  bookingType           String?          @default("STD") // STD, AVIS, APT
+  bookingManager        String?          @default("CARRIER") // CARRIER, CT
+  
+  // Appointment / Execution Fields (CBA)
+  actualPickupDate      DateTime?
+  pickUpTime            String?          // HH:mm
+  confirmedDeliveryDate DateTime?
+  confirmedDeliveryTime String?          // HH:mm
+
+  history               SalesOrderHistory[]
+
+  createdAt             DateTime         @default(now())
+  updatedAt             DateTime         @updatedAt
+  
+  @@index([status])
+  @@index([shippingType])
+  @@index([country])
+  @@index([requestedShippingDate])
+  @@index([shipToAddress])
+  @@index([shipToAddress, requestedShippingDate])
+  @@index([tpaNumber])
+}
+
+model PlanningResult {
+  id          String           @id @default(uuid())
+  tpaNumber   String
+  groupNo     String?          
+  totalLdm    Decimal
+  totalPallets Int?
+  
+  effectiveShipmentType String? // New
+  
+  metadata    Json?
+  
+  salesOrders SalesOrder[]
+  historyItems SalesOrderHistory[]
+
+  createdAt   DateTime         @default(now())
+}
+
+model SalesOrderHistory {
+  id              String         @id @default(uuid())
+  
+  salesOrderId    String
+  salesOrder      SalesOrder     @relation(fields: [salesOrderId], references: [id])
+  
+  // Snapshot of state
+  tpaNumber       String?
+  tpaGroupId      String?
+  
+  planningResultId String?
+  planningResult   PlanningResult? @relation(fields: [planningResultId], references: [id])
+  
+  createdAt       DateTime       @default(now())
+  
+  @@index([salesOrderId])
+}
+
+model TPAGroup {
+  id                   String         @id @default(uuid())
+  groupNo              String?        @unique // New distinct reference
+  tpaReference         String?        @unique // Legacy reference
+  
+  plannedDate          DateTime?      // Maybe redundant with shipDate?
+  shipDate             DateTime?      // New
+  
+  status               TPAGroupStatus @default(OPEN)
+  shippingType         ShippingType
+  
+  // Aggregates
+  totalVolumeM3        Decimal        @default(0) @map("volumeTotalM3")
+  totalWeight          Decimal        @default(0)
+  totalPallets         Int            @default(0) @map("palletsTotal")
+  totalLDM             Decimal        @default(0) @map("ldmTotal")
+  totalPcs             Int            @default(0) @map("pcsTotal")
+  ordersCount          Int            @default(0)
+
+  // Location / Lane
+  laneId               String?
+  destinationCountry   String?
+  destinationZipCode   String?
+  destinationCity      String?
+  shipToId             String? // For Direct
+
+  // Integrations
+  ortecPalletLink      String?
+  ortecPalletRequestId String?
+  
+  salesOrders          SalesOrder[]
+  
+  // Many-to-Many with Trucks (Explicit or Implicit)
+  trucks               TruckGroup[]
+  
+  finalReference       String?
+
+  createdAt            DateTime       @default(now())
+  updatedAt            DateTime       @updatedAt
+
+  // Idempotency Constraints (Relaxed slightly to allow multiple groups per day if needed, but spec asked for unique)
+  // @@unique([laneId, shipDate, shippingType]) // Only for Groupage
+  // Doing this conditional Unique is hard in Prisma. We might rely on app logic or generic Unique if feasible.
+  // For now, index them for quick lookup.
+  @@index([laneId, shipDate, shippingType, status])
+}
+
+enum LoadType {
+  DIRECT
+  PRELOAD
+  COMBI
+  LZV
+}
+
+model TruckGroup {
+  id                   String           @id @default(uuid())
+  truckNumber          String?          @unique @map("truckNo") // New 
+  
+  status               TruckGroupStatus @default(OPEN)
+  shipDate             DateTime?
+  laneId               String?
+  
+  // Limits
+  maxLdm               Decimal          @default(13.6)
+  truckType            TruckType?       @default(STANDARD)
+  customLdm            Decimal?
+  maxPallets           Int              @default(33)
+  maxHeightM           Decimal?
+  
+  // Aggregates
+  truckTotalVolume     Decimal          @default(0) @map("volumeTotalM3")
+  truckTotalWeight     Decimal          @default(0)
+  truckTotalPallets    Int              @default(0) @map("palletsTotal")
+  truckTotalLDM        Decimal          @default(0) @map("ldmTotal")
+  ordersCount          Int              @default(0)
+  
+  // Logistics
+  bookingDate          DateTime?
+  plannedPickUpDate    DateTime?        @map("pickupDate")
+  plannedShippingTime  DateTime?        @map("pickupTime")
+  requestShippingDate  DateTime?
+  loadType             LoadType?
+  executionRef         String?
+  bookingRequired      Boolean          @default(false)
+  
+  ortecTruckLink       String?          @map("ortecRef")
+  ortecTruckRequestId  String?
+  carrierId            String?
+  
+  tpaGroups            TPAGroup[]
+  salesOrders          SalesOrder[] // Direct relation also possible/useful
+
+  createdAt            DateTime         @default(now())
+  updatedAt            DateTime         @updatedAt
+  
+  @@index([shipDate, laneId, status])
+}
+
+model CountryRule {
+  id              String   @id @default(uuid())
+  country         String
+  maxHeight       Decimal?
+  maxPallets      Int?
+  maxVolumeM3     Decimal?
+  maxLDM          Decimal?
+  restrictionCode String
+}
+
+model DirectShipToRule {
+  id          String   @id @default(uuid())
+  country     String
+  customerId  String
+  shipToId    String
+  forceDirect Boolean  @default(true)
+  active      Boolean  @default(true)
+  note        String?
+}
+
+model ParcelRule {
+  id                String   @id @default(uuid())
+  country           String
+  allowParcel       Boolean  @default(true)
+  maxWeight         Decimal?
+  maxVolumeM3       Decimal?
+  maxHeight         Decimal?
+  forbiddenVasCodes String? // CSV
+  note              String?
+}
+
+model Lane {
+  id          String   @id @default(uuid())
+  name        String
+  countries   String   // CSV: "AT,CH,DE"
+  isActive    Boolean  @default(true) @map("active")
+  description String?
+  
+  // New Fields
+  lanePriority Int      @default(100)
+  maxLdm       Decimal  @default(13.6)
+  maxPallets   Int      @default(33)
+  maxHeightM   Decimal?
+  maxWeightKg  Decimal?
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}

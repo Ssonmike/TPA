@@ -1,65 +1,99 @@
-import Image from "next/image";
+import { KpiCards, KpiStats } from "@/components/kpi-cards";
+import { DataTable } from "@/components/data-table";
+import { columns } from "@/components/columns";
+import { prisma } from "@/lib/db";
+import { Button } from "@/components/ui/button";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { DashboardActions } from "@/components/dashboard-actions";
+import { SalesOrderStatus, ShippingType } from "@prisma/client";
+import { fetchSalesOrders, fetchKPIs } from "./actions-data";
+import DashboardClient from "./dashboard-client";
 
-export default function Home() {
-  return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
-  );
+export const dynamic = 'force-dynamic';
+
+async function getOrders() {
+  try {
+    const rawOrders = await prisma.salesOrder.findMany({
+      orderBy: { createdAt: 'desc' },
+      // Fetching all to aggregate. Optimisation: Use prisma.aggregate in separate calls if vol is high.
+    });
+
+    // CORRECCIÓN: Convertir Decimales a Números
+    return rawOrders.map(order => ({
+      ...order,
+      weight: Number(order.weight),
+      volumeM3: Number(order.volumeM3),
+      loadingMeters: order.loadingMeters !== null ? Number(order.loadingMeters) : null,
+      height: Number(order.height),
+    }));
+
+  } catch (e) {
+    console.error("Failed to fetch orders", e);
+    return [];
+  }
+}
+
+function calculateStats(orders: any[]): KpiStats {
+  const stats: KpiStats = {
+    direct: { orders: 0, pallets: 0, pieces: 0 },
+    groupage: { orders: 0, pallets: 0, pieces: 0 },
+    parcels: { orders: 0, pieces: 0 },
+    blocked: { orders: 0 },
+    openWorkload: { orders: 0 },
+    capacity: { remaining: 10000, total: 10000 }
+  };
+
+  let totalCartons = 0;
+
+  orders.forEach(o => {
+    const isDirect = o.shippingType === ShippingType.DIRECT_LTL || o.shippingType === ShippingType.DIRECT_FTL;
+    const isGroupage = o.shippingType === ShippingType.GROUPAGE;
+    const isParcel = o.shippingType === ShippingType.PARCEL;
+    const isBlocked = o.status === SalesOrderStatus.ON_HOLD;
+    const isOpen = o.status === SalesOrderStatus.OPEN;
+
+    // Aggregates for Tiles (Usually based on Open/OnHold/Planned working set, here assuming all fetched are relevant)
+    // Let's filter slightly: usually KPIs reflect the "Active" workload
+    if (o.status === SalesOrderStatus.CANCELLED || o.status === SalesOrderStatus.RECEIVED) return;
+
+    if (isDirect) {
+      stats.direct.orders++;
+      stats.direct.pallets += o.pallets;
+      stats.direct.pieces += o.cartonQuantity;
+    }
+    if (isGroupage) {
+      stats.groupage.orders++;
+      stats.groupage.pallets += o.pallets;
+      stats.groupage.pieces += o.cartonQuantity;
+    }
+    if (isParcel) {
+      stats.parcels.orders++;
+      stats.parcels.pieces += o.cartonQuantity;
+    }
+    if (isBlocked) {
+      stats.blocked.orders++;
+    }
+    if (isOpen) {
+      stats.openWorkload.orders++;
+    }
+
+    // Capacity Usage (Only count when in P.Calc status)
+    if (o.status === SalesOrderStatus.PALLET_CALC_REQUESTED) {
+      totalCartons += o.cartonQuantity;
+    }
+  });
+
+  stats.capacity.remaining = Math.max(0, 10000 - totalCartons);
+
+  return stats;
+}
+
+export default async function DashboardPage() {
+  // Initial Fetch on Server
+  const start = Date.now();
+  const orders = await fetchSalesOrders();
+  const kpis = await fetchKPIs();
+  console.log(`Initial Load: ${Date.now() - start}ms`);
+
+  return <DashboardClient initialOrders={orders} initialKPIs={kpis} />
 }
