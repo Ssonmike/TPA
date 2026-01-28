@@ -21,7 +21,7 @@ const tpaNavItems = [
     { href: '/', icon: LayoutDashboard, label: 'Dashboard' },
     { href: '/direct', icon: ArrowRight, label: 'Direct Orders' },
     { href: '/groupage', icon: Truck, label: 'Groupage Lanes' },
-    { href: '/admin/rules', icon: Settings, label: 'Admin' },
+    { href: '/admin/', icon: Settings, label: 'Admin' },
 ];
 
 const cbaNavItems = [
